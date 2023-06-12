@@ -1,8 +1,30 @@
+
+require("./error_string")
+
+const unirest = require("unirest");
+const jwt = require('jsonwebtoken');
+const axios = require('axios');
+const Joi = require('joi');
+const qs = require('qs');
+const fs = require('fs');
+const Redis = require('./cache');
+const redis = new Redis().getInstance();
+global.log4js = require("log4js");
+//log4js.configure("./log4js.json");
+//global.logger = log4js.getLogger();
+//console = global.logger;
+
+
 /**
  * call from -  ConfigureDevices,LinkApp,UnencryptedLink Functions <br>
  * Use - To configure Device scene mode to the external api <br>
  * possible status - 200,500
- * 
+ *
+ * @async
+ * @param {object} sceneModeReqbody
+ * @param {object} context
+ * @param {string} authToken
+ * @param {boolean} [bool=false]
  */
 async function configureSceneMode(sceneModeReqbody, context, authToken, bool = false) {
 
@@ -53,9 +75,165 @@ async function configureSceneMode(sceneModeReqbody, context, authToken, bool = f
 }
 
 /**
-  *call from - ConfigureDevices , UnLinkApp, SetTags, UnlinkDevice <br>
-  *Use - To Remove a piline from controller server's external api <br>
-  */
+ * processGetImageURI
+ *
+ * @async
+ * @param {array} arrayOfPromises
+ * @param {null} [context=null]
+ */
+async function processGetImageURI(arrayOfPromises, context = null) {
+  let responses = await Promise.all(arrayOfPromises);
+  return responses;
+}
+
+/**
+ * processNodeConfig
+ *
+ * @async
+ * @param {array} arrayOfPromises
+ * @param {null} [context=null]
+ */
+async function processNodeConfig(arrayOfPromises, context=null) {
+  let responses = await Promise.all(arrayOfPromises);
+
+  var res = {}
+  res.ConfigType = "All";
+  res.Status = true;
+  res.DataPipelineConfigList = {};
+  res.dataPipelineConfig = "NA";
+
+  for (let response of responses) {
+    if (response.Code === 500) {
+      res.Status = false;
+      break;
+    }
+    console.log(response)
+    if (response.ConfigType === "Datapipeline" && response.Code === 201) {
+
+      res.dataPipelineConfig = "Success";
+      res.ConfigType = "All";
+      res.Status = true;
+
+      if (response.NodeID in res.DataPipelineConfigList) {
+        if (!res.DataPipelineConfigList[response.NodeID].includes(response.AppID)) {
+          res.DataPipelineConfigList[response.NodeID].push(response.AppID)
+        }
+      } else {
+        res.DataPipelineConfigList[response.NodeID] = [response.AppID]
+      }
+      if (response.ConfigType === "Datapipeline" && res.dataPipelineConfig !== "Success" && response.Code !== 500) {
+
+        if (response.Code === 201) {
+          res.dataPipelineConfig = "Success";
+          res.ConfigType = "All";
+          res.Status = true;
+        } else {
+          res.dataPipelineConfig = "Fail";
+          res.Status = false;
+          res.ConfigType = "Datapipeline";
+        }
+      }
+    }
+  }
+
+  return res;
+}
+
+/**
+ * getImageURI
+ *
+ * @async
+ * @param {object} node
+ * @param {string} normalisationURI
+ * @param {string} normalisationToken
+ * @param {null} [context=null]
+ */
+async function getImageURI(node, normalisationURI, normalisationToken, context = null) {
+
+  var startDate = new Date();
+  startDate.setHours(startDate.getHours() - 24 * 7);
+  var endDate = new Date();
+  var imageURI = "";
+  var accountServiceID = process.env.ACCOUNT_SERVICE_ID;
+
+  try {
+    ///GetSceneMarkManifest
+    var sceneMarkurl = "https://" + normalisationURI + "/1.0/" + accountServiceID + "/getscenemarkmanifest";
+    var sceneMarkBody = {
+      "NodeIDs": [node.NodeID],
+      "StartTime": startDate.toISOString(),
+      "EndTime": endDate.toISOString(),
+      "PageLength": 1,
+      "ResetCache": true,
+      "ReturnNICEItemTypes": true,
+      "ReturnSceneMarkDates": true,
+      "ReturnPage": true,
+      "ListNICEItemTypes": [
+        "Motion",
+        "Face",
+        "Human",
+        "Vehicle",
+        "Label",
+        "TextLogoQRCode",
+        "Animal",
+        "Custom",
+        "Scene",
+        "Fire",
+        "Furniture",
+        "Bag",
+        "Accessory",
+        "Weapon",
+        "Undefined"
+      ],
+      "ListEventTypes": [
+        "Custom",
+        "ItemPresence",
+        "Loitering",
+        "Intrusion",
+        "Falldown",
+        "Violence",
+        "Fire",
+        "Abandonment",
+        "Express",
+        "SpeedGate",
+        "Xray",
+        "Facility",
+        "Scheduled"
+      ],
+      "ContinuationToken": null,
+      "StartNumber": 0,
+      "EndNumber": 0,
+      "MaxNumber": 1
+    }
+
+    var sceneMarkResponse = await unirest.post(sceneMarkurl).headers({
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "Authorization": "Bearer " + normalisationToken
+    }).strictSSL(false).send(sceneMarkBody)
+
+    if (sceneMarkResponse.code === 200 && sceneMarkResponse.body.SceneMarkList !== null && sceneMarkResponse.body.SceneMarkList.length > 0) {
+
+      imageURI = sceneMarkResponse.body.SceneMarkList[0].SceneDataThumbnail.SceneDataThumbnailURI;
+
+    }
+  } catch (e) {
+    context.log('Error while Fetching thumbnail URI ' + e);
+  }
+
+  return { "NodeID": node.NodeID, "ImageURI": imageURI };
+
+}
+
+/**
+ * call from - ConfigureDevices , UnLinkApp, SetTags, UnlinkDevice
+ * Use - To Remove a piline from controller server's external api
+ *
+ * @async
+ * @param {object} delPipelineConfigReqbody
+ * @param {object} context
+ * @param {string} authToken
+ */
 async function delDataPipeline(delPipelineConfigReqbody, context, authToken) {
 
   var responseStatus = {};
@@ -98,10 +276,15 @@ async function delDataPipeline(delPipelineConfigReqbody, context, authToken) {
 
 }
 
-/** 
-  *call from - ConfigureDevices , LinkApp, SetTags, SetTagsUnencrypted, UnencryptedLink App <br>
-  *Use - To Configure a piline from controller server's external api <br> 
-  */
+/**
+ * call from - ConfigureDevices , LinkApp, SetTags, SetTagsUnencrypted, UnencryptedLink App <br>
+ * Use - To Configure a piline from controller server's external api
+ *
+ * @async
+ * @param {object} setPipelineConfigReqbody
+ * @param {object} context
+ * @param {string} authToken
+ */
 async function configureDataPipeline(setPipelineConfigReqbody, context, authToken) {
 
   var responseStatus = "";
@@ -127,10 +310,16 @@ async function configureDataPipeline(setPipelineConfigReqbody, context, authToke
   return responseStatus;
 
 }
+
 /**
-  *call from - ConfigureDevices , LinkApp, SetTags, SetTagsUnencrypted, UnencryptedLink App <br>
-  *Use - To Configure a piline from controller server's external api <br>
-  */
+ * call from - ConfigureDevices , LinkApp, SetTags, SetTagsUnencrypted, UnencryptedLink App<br>
+ * Use - To Configure a piline from controller server's external api
+ *
+ * @async
+ * @param {object} setPipelineConfigReqbody
+ * @param {object} context
+ * @param {string} authToken
+ */
 async function configureDataPipelineFull(setPipelineConfigReqbody, context, authToken) {
 
   var responseStatus = {};
@@ -189,10 +378,14 @@ async function configureDataPipelineFull(setPipelineConfigReqbody, context, auth
   return responseStatus;
 
 }
+
 /**
-  *call from - Every function <br>
-  *Use - To check validation of request parameters <br>
-  */
+ * call from - Every function
+ * Use - To check validation of request parameters
+ *
+ * @param {object} request_data_body
+ * @param {array} params_array
+ */
 function setValidators(request_data_body, params_array) {
   if (request_data_body) {
     let obj = {};
@@ -241,9 +434,16 @@ function setValidators(request_data_body, params_array) {
 }
 
 /**
-  *call from - Every function <br>
-  *Use - To check validation of request parameters <br>
-  */
+ * call from - Every function <br>
+ * Use - To check validation of request parameters <br>
+ *
+ * @async
+ * @param {object} request_data_body
+ * @param {array} params_array
+ * @param {object} inner_params
+ * @param {object} request_headers
+ * @param {array} headers_array
+ */
 async function check_request_params(request_data_body, params_array, inner_params, request_headers, headers_array) {
   // context.log("==========check_request_params========")
   // context.log(headers_array)
@@ -262,6 +462,12 @@ async function check_request_params(request_data_body, params_array, inner_param
   }*/
   return (response);
 }
+
+/**
+ * encryptPassword
+ *
+ * @param {string} password
+ */
 function encryptPassword (password) {
   var crypto = require('crypto');
   try {
@@ -270,10 +476,15 @@ function encryptPassword (password) {
     // console.error(error);
   }
 };
+
 /**
-  *call from - ConfigureNotification, GetAccountNode, GetAppControlObject, GetControlObject, GetTags, GetNotifications, SetTags<br>
-  *Use - To validate device token from the authorize header<br>
-  */
+ * call from - ConfigureNotification, GetAccountNode, GetAppControlObject, GetControlObject, GetTags, GetNotifications, SetTags<br>
+ * Use - To validate device token from the authorize header<br>
+ *
+ * @async
+ * @param {object} headers
+ * @param {boolean} [check=false]
+ */
 async function deviceTokenValidate(headers, check = false) {
   var cert = process.env.PEM_CERT;
   cert = Buffer.from(cert, "utf-8");
@@ -346,14 +557,25 @@ async function deviceTokenValidate(headers, check = false) {
   return ({ success: false });*/
 };
 
-
+/**
+  * ValidateAADTokenValidate
+  *
+  * @async
+  * @param {object} headers
+  */
  async function ValidateAADTokenValidate(headers) {
 
   return ({ success: true });
 };
+
 /**
-  *call from - ConfigureNotification, GetAccessToken, GetNotifications, GetTags, SetNotifications, SetTags<br>
-  *Use - Will decrypt object with cmf and return that to response with the Keyservice external api<br>
+  * call from - ConfigureNotification, GetAccessToken, GetNotifications, GetTags, SetNotifications, SetTags<br>
+  * Use - Will decrypt object with cmf and return that to response with the Keyservice external api<br>
+  *
+  * @async
+  * @param {object} body
+  * @param {object} context
+  * @param {boolean} [check=false]
   */
  async function decryptCMF(body, context, check = false) {
 
@@ -405,10 +627,16 @@ async function deviceTokenValidate(headers, check = false) {
   });
 
 };
+
 /**
-  *call from -  GetAppcontrolObject,Get Control Object, GetDateTime, GetPrivacyObject, UnencryptedGetAppControl<br>
-  *Use - Will decrypt device object with cmf and return that to response with the Keyservice external api<br>
-  */
+ * call from -  GetAppcontrolObject,Get Control Object, GetDateTime, GetPrivacyObject, UnencryptedGetAppControl<br>
+ * Use - Will decrypt device object with cmf and return that to response with the Keyservice external api<br>
+ *
+ * @async
+ * @param {object} body
+ * @param {object} context
+ * @param {boolean} [check=false]
+ */
 async function decryptDeviceCMF(body, context, check = false) {
 
   var encryptedPayload = {};
@@ -508,9 +736,17 @@ async function decryptDeviceCMF(body, context, check = false) {
 };
 
 /**
-  *call from -  ConfigureNotifications,GetAccessToken,GetAppControlObject,GetControlObject,GetDateTime,GetNotifications,GetTags,SetNotifications,SetTags,UnencryptedGetAppControl<br>
-  *Use - Will encrypt reponse object with cmf and return that to response with the Keyservice external api<br>
-  */
+ * call from -  ConfigureNotifications,GetAccessToken,GetAppControlObject,GetControlObject,GetDateTime,GetNotifications,GetTags,SetNotifications,SetTags,UnencryptedGetAppControl<br>
+ * Use - Will encrypt reponse object with cmf and return that to response with the Keyservice external api<br>
+ *
+ * @async
+ * @param {object} payload
+ * @param {string} encryptionKey
+ * @param {object} context
+ * @param {string} algorithm
+ * @param {string} keyAlgorithm
+ * @param {boolean} [check=false]
+ */
 async function encryptCMF(payload, encryptionKey, context, algorithm, keyAlgorithm, check = false) {
 
   if (check === false) {
@@ -557,10 +793,21 @@ async function encryptCMF(payload, encryptionKey, context, algorithm, keyAlgorit
     "Success": status
   });
 };
+
 /**
-  *call from -  Get Privacy Object <br>
-  *Use - Will encrypt privacy object with cmf and return that to response with the Keyservice external api <br>
-  */
+ * call from -  Get Privacy Object <br>
+ * Use - Will encrypt privacy object with cmf and return that to response with the Keyservice external api <br>
+ *
+ * @async
+ * @param {object} payload
+ * @param {string} encryptionKey
+ * @param {object} context
+ * @param {string} algorithm
+ * @param {string} keyAlgorithm
+ * @param {boolean} [check=false]
+ * @param {string} encryptedSceneEncryptionKey
+ * @returns {unknown}
+ */
 async function encryptPrivacyCMF(payload, encryptionKey, context, algorithm, keyAlgorithm, check = false, encryptedSceneEncryptionKey) {
 
   if (check === false) {
@@ -608,10 +855,14 @@ async function encryptPrivacyCMF(payload, encryptionKey, context, algorithm, key
     "Success": status
   });
 };
+
 /**
-  *call from -  Configure Devices,Configure Notification, Link App, Link Device, Set Notification, Set Tags, Set Tags Unencrypted, Unencrypted LinkApp, Unlink App, Unlink Device <br>
-  *Use - Will generate access token from the client id and token and return access token and also store that token in redis to reuse it again <br>
-  */
+ * call from -  Configure Devices,Configure Notification, Link App, Link Device, Set Notification, Set Tags, Set Tags Unencrypted, Unencrypted LinkApp, Unlink App, Unlink Device <br>
+ * Use - Will generate access token from the client id and token and return access token and also store that token in redis to reuse it again <br>
+ *
+ * @async
+ * @param {object} context
+ */
 async function generateControllerAADToken(context) {
 
   var controllerToken = "";
@@ -642,11 +893,19 @@ async function generateControllerAADToken(context) {
 
   return controllerToken;
 }
+
 /**
-  *call from -  Every api which are sending responses <br>
-  *Use - Sending common response format and put log for every response <br>
-  *possible status - 500,400,401,403,404,409,503 <br>
-*/
+ * call from -  Every api which are sending responses
+ * Use - Sending common response format and put log for every response
+ * possible status - 500,400,401,403,404,409,503
+ *
+ * @async
+ * @param {object} context
+ * @param {string} status
+ * @param {object} body
+ * @param {string} responseCode
+ * @param {string} responseMessage
+ */
 async function sendCommonResponse(context, status, body, responseCode, responseMessage, headers = {'Content-Type': 'application/json'}) {
   if (status == 400 || status == 401 || status == 403 || status == 404 || status == 409 || status == 500 || status == 503){
     context.log("=======" + status + "=======");
